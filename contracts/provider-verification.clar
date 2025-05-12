@@ -1,76 +1,131 @@
-;; Provider Verification Contract
-;; Validates healthcare practitioners and stores their credentials
+;; Facility Verification Contract
+;; Validates production sites in the manufacturing network
 
 (define-data-var admin principal tx-sender)
 
-;; Provider status: 0 = unverified, 1 = verified, 2 = suspended
-(define-map providers
-  { provider-id: principal }
+;; Facility status: 0 = unverified, 1 = pending, 2 = verified, 3 = suspended
+(define-map facilities
+  { facility-id: (string-ascii 64) }
   {
-    name: (string-utf8 100),
-    license-number: (string-utf8 50),
+    owner: principal,
+    name: (string-ascii 100),
+    location: (string-ascii 100),
     status: uint,
-    verification-date: uint
+    verification-date: uint,
+    verifier: principal
   }
 )
 
-(define-public (register-provider (name (string-utf8 100)) (license-number (string-utf8 50)))
-  (let ((provider-id tx-sender))
-    (if (is-none (map-get? providers { provider-id: provider-id }))
-        (ok (map-set providers
-                     { provider-id: provider-id }
-                     {
-                       name: name,
-                       license-number: license-number,
-                       status: u0,
-                       verification-date: u0
-                     }))
-        (err u1) ;; Provider already registered
+;; List of authorized verifiers
+(define-map verifiers
+  { verifier: principal }
+  { authorized: bool }
+)
+
+;; Read-only function to check if a facility exists
+(define-read-only (facility-exists (facility-id (string-ascii 64)))
+  (is-some (map-get? facilities { facility-id: facility-id }))
+)
+
+;; Read-only function to get facility details
+(define-read-only (get-facility (facility-id (string-ascii 64)))
+  (map-get? facilities { facility-id: facility-id })
+)
+
+;; Read-only function to check if a principal is an authorized verifier
+(define-read-only (is-verifier (verifier principal))
+  (default-to false (get authorized (map-get? verifiers { verifier: verifier })))
+)
+
+;; Register a new facility (only unverified status)
+(define-public (register-facility
+    (facility-id (string-ascii 64))
+    (name (string-ascii 100))
+    (location (string-ascii 100)))
+  (let ((sender tx-sender))
+    (asserts! (not (facility-exists facility-id)) (err u1)) ;; Facility ID already exists
+    (map-set facilities
+      { facility-id: facility-id }
+      {
+        owner: sender,
+        name: name,
+        location: location,
+        status: u1, ;; pending status
+        verification-date: u0,
+        verifier: sender
+      }
+    )
+    (ok true)
+  )
+)
+
+;; Verify a facility (only authorized verifiers)
+(define-public (verify-facility (facility-id (string-ascii 64)))
+  (let ((sender tx-sender))
+    (asserts! (is-verifier sender) (err u2)) ;; Not an authorized verifier
+    (asserts! (facility-exists facility-id) (err u3)) ;; Facility does not exist
+
+    (let ((facility (unwrap! (get-facility facility-id) (err u4))))
+      (map-set facilities
+        { facility-id: facility-id }
+        (merge facility {
+          status: u2, ;; verified status
+          verification-date: block-height,
+          verifier: sender
+        })
+      )
+      (ok true)
     )
   )
 )
 
-(define-public (verify-provider (provider-id principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u403)) ;; Only admin can verify
-    (match (map-get? providers { provider-id: provider-id })
-      provider-data (ok (map-set providers
-                                 { provider-id: provider-id }
-                                 (merge provider-data {
-                                   status: u1,
-                                   verification-date: block-height
-                                 })))
-      (err u404) ;; Provider not found
+;; Suspend a facility (only admin)
+(define-public (suspend-facility (facility-id (string-ascii 64)))
+  (let ((sender tx-sender))
+    (asserts! (is-eq sender (var-get admin)) (err u5)) ;; Not admin
+    (asserts! (facility-exists facility-id) (err u3)) ;; Facility does not exist
+
+    (let ((facility (unwrap! (get-facility facility-id) (err u4))))
+      (map-set facilities
+        { facility-id: facility-id }
+        (merge facility {
+          status: u3 ;; suspended status
+        })
+      )
+      (ok true)
     )
   )
 )
 
-(define-public (suspend-provider (provider-id principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u403)) ;; Only admin can suspend
-    (match (map-get? providers { provider-id: provider-id })
-      provider-data (ok (map-set providers
-                                 { provider-id: provider-id }
-                                 (merge provider-data { status: u2 })))
-      (err u404) ;; Provider not found
+;; Add a verifier (only admin)
+(define-public (add-verifier (verifier principal))
+  (let ((sender tx-sender))
+    (asserts! (is-eq sender (var-get admin)) (err u5)) ;; Not admin
+    (map-set verifiers
+      { verifier: verifier }
+      { authorized: true }
     )
+    (ok true)
   )
 )
 
-(define-read-only (get-provider (provider-id principal))
-  (map-get? providers { provider-id: provider-id })
-)
-
-(define-read-only (is-verified-provider (provider-id principal))
-  (match (map-get? providers { provider-id: provider-id })
-    provider-data (is-eq (get status provider-data) u1)
-    false
+;; Remove a verifier (only admin)
+(define-public (remove-verifier (verifier principal))
+  (let ((sender tx-sender))
+    (asserts! (is-eq sender (var-get admin)) (err u5)) ;; Not admin
+    (map-set verifiers
+      { verifier: verifier }
+      { authorized: false }
+    )
+    (ok true)
   )
 )
 
+;; Transfer admin rights (only current admin)
 (define-public (transfer-admin (new-admin principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get admin)) (err u403))
-    (ok (var-set admin new-admin))
+  (let ((sender tx-sender))
+    (asserts! (is-eq sender (var-get admin)) (err u5)) ;; Not admin
+    (var-set admin new-admin)
+    (ok true)
   )
 )
